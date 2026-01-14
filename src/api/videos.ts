@@ -1,8 +1,67 @@
 import { respondWithJSON } from "./json";
 
 import { type ApiConfig } from "../config";
-import type { BunRequest } from "bun";
+import { type BunRequest } from "bun";
+import { BadRequestError, UserForbiddenError } from "./errors";
+import { getBearerToken, validateJWT } from "../auth";
+import { getVideo, updateVideo } from "../db/videos";
+import { mediaTypeToExt } from "./assets";
+import { randomBytes } from "node:crypto";
+import path from "node:path";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
-  return respondWithJSON(200, null);
+  const { videoId } = req.params as { videoId?: string };
+  if (!videoId) {
+    throw new BadRequestError("Invalid video id");
+  }
+
+  const MAX_UPLOAD_SIZE = 1 << 30;
+
+  const token = getBearerToken(req.headers);
+  const userID = validateJWT(token, cfg.jwtSecret);
+
+  const video = getVideo(cfg.db, videoId);
+  if (!video) {
+    throw new Error("couldn't find video");
+  }
+
+  if (userID !== video.userID) {
+    throw new UserForbiddenError("not authorized to upload video");
+  }
+
+  const formData = await req.formData();
+  const file = formData.get("video");
+  if (!(file instanceof File)) {
+    throw new BadRequestError("Video file missing");
+  }
+
+  if (file.size > MAX_UPLOAD_SIZE) {
+    throw new BadRequestError("Video file exceeds the maximum allowed size of 1GB");
+  }
+
+  const mediaType = file.type;
+  if (!mediaType) {
+    throw new BadRequestError("Missing Content-Type for video");
+  }
+
+  if (mediaType !== "video/mp4") {
+    throw new BadRequestError("Invalid file type");
+  }
+
+    const ext = mediaTypeToExt(mediaType);
+    const filename = `${randomBytes(32).toString("hex")}${ext}`;
+  
+    const tempPath = path.join("/tmp/", filename)
+    await Bun.write(tempPath, file);
+
+    const s3File = cfg.s3Client.file(filename);
+    await s3File.write(Bun.file(tempPath), {
+      type: mediaType
+    });
+
+    const videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${filename}`;
+    video.videoURL = videoURL;
+    updateVideo(cfg.db, video);
+    await Bun.file(tempPath).delete();
+    return respondWithJSON(200, video);
 }
