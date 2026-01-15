@@ -54,9 +54,10 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     const tempPath = path.join("/tmp/", filename)
     await Bun.write(tempPath, file);
     const aspectRatio = await getVideoAspectRatio(tempPath);
+    const processedVideoPath = await processVideoForFastStart(tempPath);
 
     const s3File = cfg.s3Client.file(`${aspectRatio}/${filename}`);
-    await s3File.write(Bun.file(tempPath), {
+    await s3File.write(Bun.file(processedVideoPath), {
       type: mediaType
     });
 
@@ -64,6 +65,7 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     video.videoURL = videoURL;
     updateVideo(cfg.db, video);
     await Bun.file(tempPath).delete();
+    await Bun.file(processedVideoPath).delete();
     return respondWithJSON(200, video);
 }
 
@@ -107,4 +109,31 @@ async function getVideoAspectRatio(filepath: string) {
     } else {
       return "other";
     }
+}
+
+async function processVideoForFastStart(inputFilePath: string) {
+    const outputFilePath = `${inputFilePath}.processed`;
+    const proc = Bun.spawn([
+      "ffmpeg",
+      "-i",
+      inputFilePath,
+      "-movflags",
+      "faststart",
+      "-map_metadata",
+      "0",
+      "-codec",
+      "copy",
+      "-f",
+      "mp4",
+      outputFilePath
+    ], {
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    if (await proc.exited !== 0) {
+      throw new Error(`Error in encoding video: ${await new Response(proc.stderr).text()}`);
+    }
+
+    return outputFilePath;
 }
