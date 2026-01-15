@@ -53,15 +53,58 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   
     const tempPath = path.join("/tmp/", filename)
     await Bun.write(tempPath, file);
+    const aspectRatio = await getVideoAspectRatio(tempPath);
 
-    const s3File = cfg.s3Client.file(filename);
+    const s3File = cfg.s3Client.file(`${aspectRatio}/${filename}`);
     await s3File.write(Bun.file(tempPath), {
       type: mediaType
     });
 
-    const videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${filename}`;
+    const videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${aspectRatio}/${filename}`;
     video.videoURL = videoURL;
     updateVideo(cfg.db, video);
     await Bun.file(tempPath).delete();
     return respondWithJSON(200, video);
+}
+
+async function getVideoAspectRatio(filepath: string) {
+    const proc = Bun.spawn([
+      "ffprobe",
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      filepath
+    ], {
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    if (await proc.exited !== 0) {
+      throw new Error("something wrong with Bun.spawn");
+    }
+
+    const stdoutText = await new Response(proc.stdout).text();
+    const stderrText = await new Response(proc.stderr).text();
+
+    if (stderrText) {
+      throw new Error("Error in reading stream");
+    }
+
+    const parsedStdout = JSON.parse(stdoutText);
+
+    const landscapeRatio = Math.floor(16 / 9);
+    const portraitRatio = Math.floor(9 / 16);
+
+    if (Math.floor(parsedStdout.streams[0].width / parsedStdout.streams[0].height) === landscapeRatio) {
+      return "landscape";
+    } else if (Math.floor(parsedStdout.streams[0].width / parsedStdout.streams[0].height) === portraitRatio) {
+      return "portrait";
+    } else {
+      return "other";
+    }
 }
